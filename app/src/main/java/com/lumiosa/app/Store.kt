@@ -10,7 +10,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
-data class HistItem(val uri: String, val name: String, val page: Int)
+data class HistItem(val uri: String, val name: String, val page: Int, val scroll: Int = 0)
 
 /** Recent files + last page per file, kept in SharedPreferences. */
 class HistoryStore(ctx: Context) {
@@ -22,7 +22,7 @@ class HistoryStore(ctx: Context) {
             val arr = JSONArray(raw)
             (0 until arr.length()).map {
                 val o = arr.getJSONObject(it)
-                HistItem(o.getString("u"), o.getString("n"), o.optInt("p", 0))
+                HistItem(o.getString("u"), o.getString("n"), o.optInt("p", 0), o.optInt("s", 0))
             }
         } catch (e: Exception) {
             emptyList()
@@ -31,7 +31,7 @@ class HistoryStore(ctx: Context) {
 
     private fun save(list: List<HistItem>) {
         val arr = JSONArray()
-        list.forEach { arr.put(JSONObject().put("u", it.uri).put("n", it.name).put("p", it.page)) }
+        list.forEach { arr.put(JSONObject().put("u", it.uri).put("n", it.name).put("p", it.page).put("s", it.scroll)) }
         prefs.edit().putString("items", arr.toString()).apply()
     }
 
@@ -61,13 +61,29 @@ class HistoryStore(ctx: Context) {
         return list
     }
 
-    fun setPage(uri: String, page: Int) {
-        save(load().map { if (it.uri == uri) it.copy(page = page) else it })
+    /** Remember where the reader is: page, plus how far down that page (reflow). */
+    fun setPage(uri: String, page: Int, scroll: Int = 0) {
+        save(load().map { if (it.uri == uri) it.copy(page = page, scroll = scroll) else it })
+    }
+
+    // ---- bookmarks: page numbers (0-based) per PDF ----
+    private fun bmKey(uri: String) = "bm:$uri"
+
+    fun bookmarks(uri: String): List<Int> =
+        (prefs.getString(bmKey(uri), "") ?: "").split(',').mapNotNull { it.toIntOrNull() }.sorted()
+
+    /** Adds the page if missing, removes it if present; returns the new sorted list. */
+    fun toggleBookmark(uri: String, page: Int): List<Int> {
+        val cur = bookmarks(uri)
+        val next = (if (page in cur) cur - page else cur + page).sorted()
+        prefs.edit().putString(bmKey(uri), next.joinToString(",")).apply()
+        return next
     }
 
     fun remove(uri: String): List<HistItem> {
         val list = load().filter { it.uri != uri }
         save(list)
+        prefs.edit().remove(bmKey(uri)).apply()
         return list
     }
 }

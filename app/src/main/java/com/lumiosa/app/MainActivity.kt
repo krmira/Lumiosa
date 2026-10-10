@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -64,9 +65,13 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
@@ -103,6 +108,7 @@ fun App(initialUri: Uri?) {
     var rzoom by remember { mutableStateOf(store.rzoom()) }
     var reflow by remember { mutableStateOf(store.reflow()) }
     var message by remember { mutableStateOf("") }
+    var bookmarks by remember { mutableStateOf(listOf<Int>()) }
 
     fun open(uri: Uri) {
         scope.launch {
@@ -111,10 +117,11 @@ fun App(initialUri: Uri?) {
                 val e = withContext(Dispatchers.IO) { PdfEngine.open(ctx, uri) }
                 val key = uri.toString()
                 val saved = store.load().firstOrNull { it.uri == key }
-                val item = HistItem(key, saved?.name ?: displayName(ctx, uri), saved?.page ?: 0)
+                val item = HistItem(key, saved?.name ?: displayName(ctx, uri), saved?.page ?: 0, saved?.scroll ?: 0)
                 engine?.close()
                 engine = e
                 doc = item
+                bookmarks = store.bookmarks(key)
                 history = store.touch(item)
             } catch (e: SecurityException) {
                 message = "This PDF is password protected"
@@ -157,6 +164,9 @@ fun App(initialUri: Uri?) {
         ReaderScreen(
             engine = eng,
             startPage = cur.page,
+            startScroll = cur.scroll,
+            bookmarks = bookmarks,
+            onBookmark = { bookmarks = store.toggleBookmark(cur.uri, it) },
             night = night,
             zoom = if (reflow) rzoom else zoom,
             onZoom = { if (reflow) rzoom = it.coerceIn(1f, 5f) else zoom = it.coerceIn(1f, 5f) },
@@ -171,7 +181,7 @@ fun App(initialUri: Uri?) {
                 engine = null
                 doc = null
             },
-            onPage = { store.setPage(cur.uri, it) }
+            onPage = { p, sc -> store.setPage(cur.uri, p, sc) }
         )
     } else {
         MenuScreen(
@@ -280,6 +290,9 @@ private fun HistCard(item: HistItem, onOpen: (HistItem) -> Unit) {
 private fun ReaderScreen(
     engine: PdfEngine,
     startPage: Int,
+    startScroll: Int,
+    bookmarks: List<Int>,
+    onBookmark: (Int) -> Unit,
     night: Boolean,
     zoom: Float,
     onZoom: (Float) -> Unit,
@@ -287,17 +300,32 @@ private fun ReaderScreen(
     reflow: Boolean,
     onReflow: () -> Unit,
     onBack: () -> Unit,
-    onPage: (Int) -> Unit
+    onPage: (Int, Int) -> Unit
 ) {
     val pager = rememberPagerState(
         initialPage = startPage.coerceIn(0, maxOf(0, engine.pageCount - 1))
     ) { engine.pageCount }
-    LaunchedEffect(pager.currentPage) { onPage(pager.currentPage) }
+    val nav = rememberCoroutineScope()
+    var showBookmarks by remember { mutableStateOf(false) }
+    // The first page keeps the scroll position we are resuming at; later pages start at the top.
+    val resuming = remember { booleanArrayOf(true) }
+    LaunchedEffect(pager.currentPage) {
+        val sc = if (resuming[0] && pager.currentPage == startPage) startScroll else 0
+        resuming[0] = false
+        onPage(pager.currentPage, sc)
+    }
+    val here = pager.currentPage
+    val marked = here in bookmarks
+    fun jump(delta: Int) {
+        val target = (pager.currentPage + delta).coerceIn(0, maxOf(0, engine.pageCount - 1))
+        nav.launch { pager.scrollToPage(target) }
+    }
 
     val shape = RoundedCornerShape(18.dp)
     val zoomState = rememberUpdatedState(onZoom)
     val zoomNow = rememberUpdatedState(zoom)
-    Column(Modifier.fillMaxSize().background(Pal.Dark).padding(horizontal = 6.dp, vertical = 8.dp)) {
+    Box(Modifier.fillMaxSize().background(Pal.Dark)) {
+    Column(Modifier.fillMaxSize().padding(horizontal = 6.dp, vertical = 8.dp)) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 2.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -325,8 +353,31 @@ private fun ReaderScreen(
                     modifier = Modifier.clickable(onClick = onNight).padding(10.dp),
                     style = TextStyle(color = Pal.Ink, fontSize = 22.sp)
                 )
-                Spacer(Modifier.width(6.dp))
+                BasicText(
+                    if (marked) "\u2605" else "\u2606",
+                    modifier = Modifier.clickable { onBookmark(here) }.padding(horizontal = 10.dp, vertical = 6.dp),
+                    style = TextStyle(color = if (marked) Pal.Leaf else Pal.Ink, fontSize = 26.sp)
+                )
+            }
+        }
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Pill(if (bookmarks.isEmpty()) "Bookmarks" else "Bookmarks \u00B7 ${bookmarks.size}", { showBookmarks = true })
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                BasicText(
+                    "\u2039",
+                    modifier = Modifier.clickable { jump(-10) }.padding(horizontal = 14.dp, vertical = 2.dp),
+                    style = TextStyle(color = Pal.Ink, fontSize = 34.sp)
+                )
                 Pill("${pager.currentPage + 1} / ${engine.pageCount}", null)
+                BasicText(
+                    "\u203A",
+                    modifier = Modifier.clickable { jump(10) }.padding(horizontal = 14.dp, vertical = 2.dp),
+                    style = TextStyle(color = Pal.Ink, fontSize = 34.sp)
+                )
             }
         }
         Box(
@@ -360,7 +411,11 @@ private fun ReaderScreen(
                 ) { i ->
                     val rf = engine.reflow
                     if (reflow && rf != null) {
-                        ReflowView(rf, i, zoom, night)
+                        ReflowView(
+                            engine, rf, i, zoom, night,
+                            initialScroll = if (i == startPage) startScroll else 0,
+                            onScroll = { v -> if (i == pager.currentPage) onPage(i, v) }
+                        )
                     } else {
                         PageView(
                             engine, i, wPx, zoom, night,
@@ -373,6 +428,64 @@ private fun ReaderScreen(
                 }
             }
         }
+    }
+    if (showBookmarks) {
+        Box(
+            Modifier.fillMaxSize().background(Color(0xB3000000)).clickable { showBookmarks = false },
+            contentAlignment = Alignment.Center
+        ) {
+            val card = RoundedCornerShape(18.dp)
+            Column(
+                Modifier.padding(24.dp).fillMaxWidth()
+                    .clip(card).background(Pal.Deep).border(2.dp, Pal.Mid, card)
+                    .clickable(enabled = false) { }
+                    .padding(18.dp)
+            ) {
+                BasicText("Bookmarks", style = TextStyle(color = Pal.Ink, fontSize = 20.sp, fontFamily = FontFamily.Serif))
+                Spacer(Modifier.size(10.dp))
+                if (bookmarks.isEmpty()) {
+                    BasicText(
+                        "No bookmarks yet. Tap \u2606 at the top to bookmark the page you are on.",
+                        style = TextStyle(color = Pal.Dim, fontSize = 15.sp, lineHeight = 21.sp)
+                    )
+                } else {
+                    Column(Modifier.heightIn(max = 380.dp).verticalScroll(rememberScrollState())) {
+                        bookmarks.forEach { pg ->
+                            val snippet = engine.reflow?.cached(pg)?.firstOrNull { it.text.length > 3 }?.text?.take(48)
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(
+                                    Modifier.weight(1f)
+                                        .clickable {
+                                            showBookmarks = false
+                                            nav.launch { pager.scrollToPage(pg.coerceIn(0, maxOf(0, engine.pageCount - 1))) }
+                                        }
+                                        .padding(vertical = 10.dp)
+                                ) {
+                                    BasicText("Page ${pg + 1}", style = TextStyle(color = Pal.Ink, fontSize = 17.sp))
+                                    if (snippet != null) {
+                                        BasicText(
+                                            snippet,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            style = TextStyle(color = Pal.Dim, fontSize = 13.sp)
+                                        )
+                                    }
+                                }
+                                BasicText(
+                                    "\u2715",
+                                    modifier = Modifier.clickable { onBookmark(pg) }.padding(12.dp),
+                                    style = TextStyle(color = Pal.Dim, fontSize = 17.sp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     }
 }
 
@@ -421,48 +534,108 @@ private fun PageView(
 /**
  * Reflowed text of one page. Body text is [zoom]x the size it has in fit-to-width page view
  * (so 2x = double); titles keep the size they have in page view, whatever the zoom.
+ * Pages with (almost) no text - covers, picture pages, section openers - show the original
+ * page instead, and every page can show its original underneath so figures are never lost.
  */
 @Composable
-private fun ReflowView(rf: ReflowEngine, index: Int, zoom: Float, night: Boolean) {
+private fun ReflowView(
+    engine: PdfEngine,
+    rf: ReflowEngine,
+    index: Int,
+    zoom: Float,
+    night: Boolean,
+    initialScroll: Int,
+    onScroll: (Int) -> Unit
+) {
     var paras by remember(rf, index) { mutableStateOf(rf.cached(index)) }
     LaunchedEffect(rf, index) {
         if (paras == null) paras = rf.page(index)
         rf.prefetch(index)
     }
+    val p = paras
+    val chars = p?.sumOf { it.text.length } ?: 0
+    val textPoor = p != null && chars < 120
+    var showOriginal by remember(rf, index) { mutableStateOf(false) }
+    val needImage = textPoor || showOriginal
+
+    val scroll = rememberScrollState()
+    // Resume: wait until the text has been laid out tall enough, then jump to the saved spot.
+    LaunchedEffect(rf, index, p != null) {
+        if (p != null && initialScroll > 0) {
+            withTimeoutOrNull(2500) { snapshotFlow { scroll.maxValue }.first { it >= initialScroll } }
+            scroll.scrollTo(initialScroll)
+        }
+    }
+    LaunchedEffect(scroll) {
+        snapshotFlow { scroll.value }.collectLatest { v ->
+            delay(400)
+            onScroll(v)
+        }
+    }
+
+    val density = LocalDensity.current
+    val screenDp = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp
+    val imgTarget = with(density) { (screenDp.dp.toPx() * 1.15f).toInt() }.coerceIn(500, 2200)
+    var bmp by remember(engine, index) { mutableStateOf(engine.cached(index)) }
+    LaunchedEffect(engine, index, needImage) {
+        if (needImage && bmp == null) engine.page(index, imgTarget)?.let { bmp = it }
+    }
+
     val ink = if (night) Pal.Ink else Color(0xFF1E211D)
     // dp on screen per point of the PDF page, as in fit-to-width page view
-    val screenDp = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp
     val unit = (screenDp - 32f) / rf.pageWidthPt
     val bodyPt = if (rf.bodyPt > 0f) rf.bodyPt else 11f
     val bodySp = (bodyPt * unit * zoom).coerceAtLeast(14f)
-    val p = paras
+
     Column(
         Modifier.fillMaxSize()
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(scroll)
             .padding(horizontal = 16.dp, vertical = 14.dp)
     ) {
-        when {
-            p == null -> BasicText("Loading\u2026", style = TextStyle(color = Pal.Dim, fontSize = 16.sp))
-            p.isEmpty() -> BasicText(
-                "No selectable text on this page (it may be a scanned image). Tap \u00B6 to go back to page view.",
-                style = TextStyle(color = Pal.Dim, fontSize = 16.sp, lineHeight = 22.sp)
-            )
-            else -> p.forEach { para ->
-                val title = para.heading > 0f
-                val sp = if (title) (para.heading * bodyPt * unit).coerceAtLeast(16f) else bodySp
-                BasicText(
-                    para.text,
-                    modifier = Modifier.fillMaxWidth().padding(
-                        top = if (title) (sp * 0.5f).dp else 0.dp,
-                        bottom = (sp * 0.6f).dp
-                    ),
-                    style = TextStyle(
-                        color = ink,
-                        fontSize = sp.sp,
-                        lineHeight = (sp * 1.4f).sp,
-                        fontWeight = if (title) androidx.compose.ui.text.font.FontWeight.Bold else null,
-                        fontFamily = FontFamily.Serif
+        if (p == null) {
+            BasicText("Loading\u2026", style = TextStyle(color = Pal.Dim, fontSize = 16.sp))
+        } else {
+            if (!textPoor) {
+                p.forEach { para ->
+                    val title = para.heading > 0f
+                    val sp = if (title) (para.heading * bodyPt * unit).coerceAtLeast(16f) else bodySp
+                    BasicText(
+                        para.text,
+                        modifier = Modifier.fillMaxWidth().padding(
+                            top = if (title) (sp * 0.5f).dp else 0.dp,
+                            bottom = (sp * 0.6f).dp
+                        ),
+                        style = TextStyle(
+                            color = ink,
+                            fontSize = sp.sp,
+                            lineHeight = (sp * 1.4f).sp,
+                            fontWeight = if (title) androidx.compose.ui.text.font.FontWeight.Bold else null,
+                            fontFamily = FontFamily.Serif,
+                            letterSpacing = 0.sp
+                        )
                     )
+                }
+            }
+            if (needImage) {
+                val b = bmp
+                if (b != null) {
+                    val img = remember(b) { b.asImageBitmap() }
+                    Image(
+                        bitmap = img,
+                        contentDescription = null,
+                        contentScale = ContentScale.FillWidth,
+                        colorFilter = if (night) NightFilter else null,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                } else {
+                    BasicText("Loading page\u2026", style = TextStyle(color = Pal.Dim, fontSize = 14.sp))
+                }
+            }
+            if (!textPoor) {
+                BasicText(
+                    if (showOriginal) "Hide original page \u25B4" else "Show original page \u25BE",
+                    modifier = Modifier.padding(top = 6.dp).clickable { showOriginal = !showOriginal }.padding(vertical = 8.dp),
+                    style = TextStyle(color = Pal.Dim, fontSize = 14.sp)
                 )
             }
         }

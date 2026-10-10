@@ -165,7 +165,7 @@ class ReflowEngine(private val ctx: Context, private val uri: Uri) {
         if (closed || complete) return emptyList()
         val d = try { ensureDoc() } catch (e: Exception) { null } ?: return emptyList()
         if (index < 0 || index >= pages) return emptyList()
-        val result = try {
+        val result: List<Para>? = try {
             val s = SizedStripper()
             s.setStartPage(index + 1)
             s.setEndPage(index + 1)
@@ -173,10 +173,13 @@ class ReflowEngine(private val ctx: Context, private val uri: Uri) {
             s.flushLine()
             toParagraphs(s.lines)
         } catch (e: Exception) {
-            emptyList()
+            null
         } catch (e: OutOfMemoryError) {
-            emptyList()
+            null
         }
+        // A failed page is not remembered, so it is never saved as "empty"; the screen
+        // shows the original page for it instead.
+        if (result == null) return emptyList()
         if (!closed) pageText[index] = result
         return result
     }
@@ -302,12 +305,37 @@ class ReflowEngine(private val ctx: Context, private val uri: Uri) {
         if (total >= 600) bodyFrozen = true
     }
 
+    private val leader = Regex("(?:\\.\\s?){4,}")
+    private val leaderRun = Regex("\\s*(?:\\.\\s?){4,}\\s*")
+    private val trailingNum = Regex("\\s\\d{1,4}$")
+    private val ws = Regex("\\s+")
+
+    /** Tidy a title: drop odd invisible characters, rejoin letter-spaced text, fix small-caps casing. */
+    private fun fixTitle(raw: String): String {
+        var t = raw.replace(Regex("[\\p{Cf}\\p{Co}\\u2002-\\u200A]"), "").trim()
+        val tokens = t.split(' ').filter { it.isNotEmpty() }
+        // "P y t h o n"  ->  "Python"
+        if (tokens.size >= 4 && tokens.count { it.length == 1 } >= tokens.size * 0.6) t = tokens.joinToString("")
+        return t.split(' ').joinToString(" ") { w ->
+            if (!Regex("[a-z][A-Z]").containsMatchIn(w)) w
+            else {
+                val pieces = w.split(Regex("(?<=[a-z])(?=[A-Z])"))
+                // "IntroDuCtIon" (small caps) -> "Introduction"; "PythonCrashCourse" -> "Python Crash Course"
+                if (pieces.count { it.length <= 2 } >= 2) w.lowercase().replaceFirstChar { it.uppercase() }
+                else pieces.joinToString(" ")
+            }
+        }
+    }
+
     /**
      * Lines (with font sizes) -> paragraphs.
      *  - Lines clearly bigger than body text are titles; neighbouring title lines of
-     *    the same size become one title.
-     *  - Body lines are joined: a line that ends well short of full width, or ends a
-     *    sentence near the margin, starts a new paragraph; words split by a hyphen at
+     *    the same size become one title. A "title" that runs on like a sentence is
+     *    really a large opening paragraph and is treated as body text.
+     *  - Contents-page lines (dot leaders, trailing page numbers) get one line each,
+     *    with the dots shortened to a single ellipsis.
+     *  - Other body lines are joined: a line that ends well short of full width, or ends
+     *    a sentence near the margin, starts a new paragraph; words split by a hyphen at
      *    the line end are glued back together.
      */
     private fun toParagraphs(raw: List<SizedStripper.Line>): List<Para> {
@@ -322,30 +350,61 @@ class ReflowEngine(private val ctx: Context, private val uri: Uri) {
         fun ratio(l: SizedStripper.Line) = if (body > 0f) l.size / body else 1f
         fun isTitle(l: SizedStripper.Line) = ratio(l) > 1.18f && l.text.length <= 140
         val maxLen = lines.filter { !isTitle(it) }.maxOfOrNull { it.text.length }?.coerceAtLeast(1) ?: 1
+        val tocLines = lines.count { leader.containsMatchIn(it.text) || (it.text.length > 6 && trailingNum.containsMatchIn(it.text)) }
+        val tocPage = tocLines >= 5 && tocLines >= lines.size * 0.5
 
         val out = ArrayList<Para>()
         val cur = StringBuilder()
         var prev = ""
+        var forceJoin = false
         val title = StringBuilder()
         var titleRatio = 0f
+        var titleLast = ""
         fun flushBody() {
-            if (cur.isNotEmpty()) out.add(Para(cur.toString().replace(Regex("\\s+"), " ").trim()))
+            if (cur.isNotEmpty()) out.add(Para(cur.toString().replace(ws, " ").trim()))
             cur.clear()
             prev = ""
+            forceJoin = false
         }
         fun flushTitle() {
-            if (title.isNotEmpty()) out.add(Para(title.toString().replace(Regex("\\s+"), " ").trim(), titleRatio))
+            if (title.isEmpty()) return
+            val t = title.toString().replace(ws, " ").trim()
             title.setLength(0)
+            if (t.length > 160) {
+                // Big opening paragraph: keep it as body text and let the next lines continue it.
+                cur.append(t)
+                prev = titleLast
+                forceJoin = true
+            } else {
+                out.add(Para(fixTitle(t), titleRatio))
+            }
         }
         for (l in lines) {
             val line = l.text
             if (isTitle(l)) {
                 flushBody()
-                if (title.isNotEmpty() && Math.abs(titleRatio - ratio(l)) < 0.1f) title.append(' ').append(line)
-                else { flushTitle(); title.append(line); titleRatio = (Math.round(ratio(l) * 10f) / 10f) }
+                val r = ratio(l)
+                if (title.isNotEmpty() && Math.abs(titleRatio - r) < 0.1f) {
+                    if (title.length > 1 && title.last() == '-' && title[title.length - 2].isLetter() && line.first().isLowerCase()) {
+                        title.setLength(title.length - 1)
+                        title.append(line)
+                    } else {
+                        title.append(' ').append(line)
+                    }
+                } else {
+                    flushTitle()
+                    title.append(line)
+                    titleRatio = Math.round(r * 10f) / 10f
+                }
+                titleLast = line
                 continue
             }
             flushTitle()
+            if (leader.containsMatchIn(line)) {
+                flushBody()
+                out.add(Para(line.replace(leaderRun, " \u2026 ").trim()))
+                continue
+            }
             if (cur.isEmpty()) {
                 cur.append(line)
             } else {
@@ -353,20 +412,23 @@ class ReflowEngine(private val ctx: Context, private val uri: Uri) {
                 val endsSentence = prev.last() in ".!?:\u201D\"\u2019)"
                 val short = prev.length < maxLen * 0.6
                 val nearEnd = prev.length < maxLen * 0.85
-                if (short || (endsSentence && nearEnd && (first.isUpperCase() || first.isDigit()))) {
+                val gluesHyphen = prev.length > 1 && prev.last() == '-' && prev[prev.length - 2].isLetter() && first.isLowerCase()
+                if (!forceJoin && (short || (endsSentence && nearEnd && (first.isUpperCase() || first.isDigit())))) {
                     flushBody()
                     cur.append(line)
-                } else if (prev.length > 1 && prev.last() == '-' && prev[prev.length - 2].isLetter() && first.isLowerCase()) {
+                } else if (gluesHyphen) {
                     cur.setLength(cur.length - 1) // glue "hyphen-" + "ated" -> "hyphenated"
                     cur.append(line)
                 } else {
                     cur.append(' ').append(line)
                 }
+                forceJoin = false
             }
             prev = line
+            if (tocPage && trailingNum.containsMatchIn(line)) flushBody()
         }
-        flushBody()
         flushTitle()
+        flushBody()
         return out.filter { it.text.isNotBlank() }
     }
 }
