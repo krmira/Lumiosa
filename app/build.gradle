@@ -47,5 +47,7 @@ dependencies {
     implementation 'androidx.compose.ui:ui'
     implementation 'androidx.compose.foundation:foundation'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
-    // No PDF library: pages are drawn by Android's built-in PdfRenderer.
+    // Pages are drawn by Android's built-in PdfRenderer; this library is only used
+    // for Reflow mode (extracting text), and is loaded in the background.
+    implementation 'com.tom-roush:pdfbox-android:2.0.27.0'
 }

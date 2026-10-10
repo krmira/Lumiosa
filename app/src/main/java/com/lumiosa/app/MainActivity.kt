@@ -100,6 +100,7 @@ fun App(initialUri: Uri?) {
     var doc by remember { mutableStateOf<HistItem?>(null) }
     var night by remember { mutableStateOf(true) }
     var zoom by remember { mutableStateOf(store.zoom()) }
+    var reflow by remember { mutableStateOf(store.reflow()) }
     var message by remember { mutableStateOf("") }
 
     fun open(uri: Uri) {
@@ -155,6 +156,11 @@ fun App(initialUri: Uri?) {
             zoom = zoom,
             onZoom = { zoom = it.coerceIn(1f, 5f) },
             onNight = { night = !night },
+            reflow = reflow,
+            onReflow = {
+                reflow = !reflow
+                store.setReflow(reflow)
+            },
             onBack = {
                 eng.close()
                 engine = null
@@ -273,6 +279,8 @@ private fun ReaderScreen(
     zoom: Float,
     onZoom: (Float) -> Unit,
     onNight: () -> Unit,
+    reflow: Boolean,
+    onReflow: () -> Unit,
     onBack: () -> Unit,
     onPage: (Int) -> Unit
 ) {
@@ -301,6 +309,11 @@ private fun ReaderScreen(
                     "A+",
                     modifier = Modifier.clickable { onZoom(zoom + 0.2f) }.padding(horizontal = 8.dp, vertical = 10.dp),
                     style = TextStyle(color = Pal.Ink, fontSize = 22.sp)
+                )
+                BasicText(
+                    "\u00B6",
+                    modifier = Modifier.clickable(onClick = onReflow).padding(horizontal = 10.dp, vertical = 6.dp),
+                    style = TextStyle(color = if (reflow) Pal.Leaf else Pal.Ink, fontSize = 24.sp)
                 )
                 BasicText(
                     if (night) "\u25D0" else "\u25CB",
@@ -340,13 +353,18 @@ private fun ReaderScreen(
                     modifier = Modifier.fillMaxSize(),
                     beyondViewportPageCount = 1
                 ) { i ->
-                    PageView(
-                        engine, i, wPx, zoom, night,
-                        onDoubleTap = {
-                            val next = listOf(2.8f, 3.6f, 4.5f).firstOrNull { it > zoom + 0.05f } ?: 2f
-                            onZoom(next)
-                        }
-                    )
+                    val rf = engine.reflow
+                    if (reflow && rf != null) {
+                        ReflowView(rf, i, zoom, night)
+                    } else {
+                        PageView(
+                            engine, i, wPx, zoom, night,
+                            onDoubleTap = {
+                                val next = listOf(2.8f, 3.6f, 4.5f).firstOrNull { it > zoom + 0.05f } ?: 2f
+                                onZoom(next)
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -392,5 +410,44 @@ private fun PageView(
                 modifier = Modifier.width(pageWidth)
             )
         }
+    }
+}
+
+/** Reflowed text of one page: wraps to the screen width at any zoom. */
+@Composable
+private fun ReflowView(rf: ReflowEngine, index: Int, zoom: Float, night: Boolean) {
+    var paras by remember(rf, index) { mutableStateOf(rf.cached(index)) }
+    LaunchedEffect(rf, index) {
+        if (paras == null) paras = rf.page(index)
+        rf.prefetch(index)
+    }
+    val ink = if (night) Pal.Ink else Color(0xFF1E211D)
+    val size = (9f * zoom).sp
+    val p = paras
+    Column(
+        Modifier.fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 14.dp)
+    ) {
+        when {
+            p == null -> BasicText("Loading\u2026", style = TextStyle(color = Pal.Dim, fontSize = 16.sp))
+            p.isEmpty() -> BasicText(
+                "No selectable text on this page (it may be a scanned image). Tap \u00B6 to go back to page view.",
+                style = TextStyle(color = Pal.Dim, fontSize = 16.sp, lineHeight = 22.sp)
+            )
+            else -> p.forEach { para ->
+                BasicText(
+                    para,
+                    modifier = Modifier.fillMaxWidth().padding(bottom = (size.value * 0.6f).dp),
+                    style = TextStyle(
+                        color = ink,
+                        fontSize = size,
+                        lineHeight = size * 1.45f,
+                        fontFamily = FontFamily.Serif
+                    )
+                )
+            }
+        }
+        Spacer(Modifier.size(24.dp))
     }
 }

@@ -31,6 +31,9 @@ class PdfEngine private constructor(
     @Volatile private var closed = false
     private var margin = 0f // fraction trimmed from each side, same for every page
 
+    /** Text-reflow companion; only created for reader sessions (not history thumbnails). */
+    var reflow: ReflowEngine? = null
+
     private val cache = object : LruCache<Int, Bitmap>(cacheKb()) {
         override fun sizeOf(key: Int, value: Bitmap): Int = value.byteCount / 1024
     }
@@ -76,6 +79,7 @@ class PdfEngine private constructor(
     fun close() {
         if (closed) return
         closed = true
+        reflow?.close()
         CoroutineScope(Dispatchers.IO).launch {
             mutex.withLock {
                 try {
@@ -182,7 +186,11 @@ class PdfEngine private constructor(
                     throw e2
                 }
             }
-            if (detectMargins) engine.detectMargin()
+            if (detectMargins) {
+                engine.detectMargin()
+                // Start getting reflow ready now so it is instant when switched on.
+                engine.reflow = ReflowEngine(ctx.applicationContext, uri).also { it.warmUp() }
+            }
             return engine
         }
     }

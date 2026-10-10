@@ -41,6 +41,12 @@ class HistoryStore(ctx: Context) {
         prefs.edit().putFloat("zoom2", z).apply()
     }
 
+    fun reflow(): Boolean = prefs.getBoolean("reflow", false)
+
+    fun setReflow(on: Boolean) {
+        prefs.edit().putBoolean("reflow", on).apply()
+    }
+
     fun touch(item: HistItem): List<HistItem> {
         val list = (listOf(item) + load().filter { it.uri != item.uri }).take(12)
         save(list)
