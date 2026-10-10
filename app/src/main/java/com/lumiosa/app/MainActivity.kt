@@ -15,6 +15,11 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -40,14 +45,19 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
@@ -55,6 +65,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -88,6 +99,7 @@ fun App(initialUri: Uri?) {
     var engine by remember { mutableStateOf<PdfEngine?>(null) }
     var doc by remember { mutableStateOf<HistItem?>(null) }
     var night by remember { mutableStateOf(true) }
+    var zoom by remember { mutableStateOf(store.zoom()) }
     var message by remember { mutableStateOf("") }
 
     fun open(uri: Uri) {
@@ -122,6 +134,10 @@ fun App(initialUri: Uri?) {
     }
 
     LaunchedEffect(Unit) { initialUri?.let { open(it) } }
+    LaunchedEffect(zoom) {
+        delay(500)
+        store.setZoom(zoom)
+    }
 
     BackHandler(enabled = doc != null) {
         engine?.close()
@@ -136,6 +152,8 @@ fun App(initialUri: Uri?) {
             engine = eng,
             startPage = cur.page,
             night = night,
+            zoom = zoom,
+            onZoom = { zoom = it.coerceIn(1f, 5f) },
             onNight = { night = !night },
             onBack = {
                 eng.close()
@@ -252,6 +270,8 @@ private fun ReaderScreen(
     engine: PdfEngine,
     startPage: Int,
     night: Boolean,
+    zoom: Float,
+    onZoom: (Float) -> Unit,
     onNight: () -> Unit,
     onBack: () -> Unit,
     onPage: (Int) -> Unit
@@ -262,14 +282,26 @@ private fun ReaderScreen(
     LaunchedEffect(pager.currentPage) { onPage(pager.currentPage) }
 
     val shape = RoundedCornerShape(18.dp)
-    Column(Modifier.fillMaxSize().background(Pal.Dark).padding(12.dp)) {
+    val zoomState = rememberUpdatedState(onZoom)
+    val zoomNow = rememberUpdatedState(zoom)
+    Column(Modifier.fillMaxSize().background(Pal.Dark).padding(horizontal = 6.dp, vertical = 8.dp)) {
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
+            Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 2.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
             LogoTile(onBack)
             Row(verticalAlignment = Alignment.CenterVertically) {
+                BasicText(
+                    "A\u2212",
+                    modifier = Modifier.clickable { onZoom(zoom - 0.2f) }.padding(horizontal = 8.dp, vertical = 10.dp),
+                    style = TextStyle(color = Pal.Ink, fontSize = 18.sp)
+                )
+                BasicText(
+                    "A+",
+                    modifier = Modifier.clickable { onZoom(zoom + 0.2f) }.padding(horizontal = 8.dp, vertical = 10.dp),
+                    style = TextStyle(color = Pal.Ink, fontSize = 22.sp)
+                )
                 BasicText(
                     if (night) "\u25D0" else "\u25CB",
                     modifier = Modifier.clickable(onClick = onNight).padding(10.dp),
@@ -286,27 +318,68 @@ private fun ReaderScreen(
                 .border(2.dp, Pal.Mid, shape)
                 .padding(2.dp)
         ) {
-            BoxWithConstraints(Modifier.fillMaxSize()) {
+            BoxWithConstraints(
+                Modifier.fillMaxSize().pointerInput(Unit) {
+                    // Two-finger pinch zooms; single-finger drags pass through untouched.
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                        do {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            if (event.changes.size >= 2) {
+                                val z = event.calculateZoom()
+                                if (z != 1f) zoomState.value(zoomNow.value * z)
+                                event.changes.forEach { if (it.positionChanged()) it.consume() }
+                            }
+                        } while (event.changes.any { it.pressed })
+                    }
+                }
+            ) {
                 val wPx = constraints.maxWidth
                 HorizontalPager(
                     state = pager,
                     modifier = Modifier.fillMaxSize(),
                     beyondViewportPageCount = 1
-                ) { i -> PageView(engine, i, wPx, night) }
+                ) { i ->
+                    PageView(
+                        engine, i, wPx, zoom, night,
+                        onDoubleTap = {
+                            val next = listOf(2.8f, 3.6f, 4.5f).firstOrNull { it > zoom + 0.05f } ?: 2f
+                            onZoom(next)
+                        }
+                    )
+                }
             }
         }
     }
 }
 
 @Composable
-private fun PageView(engine: PdfEngine, index: Int, widthPx: Int, night: Boolean) {
-    var bmp by remember(engine, index, widthPx) { mutableStateOf(engine.cached(index, widthPx)) }
-    LaunchedEffect(engine, index, widthPx) {
-        if (bmp == null) bmp = engine.page(index, widthPx)
+private fun PageView(
+    engine: PdfEngine,
+    index: Int,
+    panelWidthPx: Int,
+    zoom: Float,
+    night: Boolean,
+    onDoubleTap: () -> Unit
+) {
+    // Render at the displayed size (plus a little extra) so text stays crisp at any zoom.
+    val target = (panelWidthPx * zoom * 1.15f).toInt().coerceIn(500, 3000)
+
+    var bmp by remember(engine, index) { mutableStateOf(engine.cached(index)) }
+    LaunchedEffect(engine, index, target) {
+        val b = bmp
+        if (b == null || b.width < target * 0.9f) {
+            engine.page(index, target)?.let { bmp = it }
+        }
     }
+
+    val pageWidth = with(LocalDensity.current) { (panelWidthPx * zoom).toDp() }
     Box(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 16.dp),
-        contentAlignment = Alignment.TopCenter
+        Modifier.fillMaxSize()
+            .pointerInput(Unit) { detectTapGestures(onDoubleTap = { onDoubleTap() }) }
+            .verticalScroll(rememberScrollState())
+            .horizontalScroll(rememberScrollState())
+            .padding(bottom = 16.dp)
     ) {
         val b = bmp
         if (b != null) {
@@ -316,7 +389,7 @@ private fun PageView(engine: PdfEngine, index: Int, widthPx: Int, night: Boolean
                 contentDescription = null,
                 contentScale = ContentScale.FillWidth,
                 colorFilter = if (night) NightFilter else null,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.width(pageWidth)
             )
         }
     }

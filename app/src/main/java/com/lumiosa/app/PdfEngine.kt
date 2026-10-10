@@ -29,30 +29,31 @@ class PdfEngine private constructor(
 
     private val mutex = Mutex()
     @Volatile private var closed = false
-    @Volatile private var cacheWidth = 0
     private var margin = 0f // fraction trimmed from each side, same for every page
 
     private val cache = object : LruCache<Int, Bitmap>(cacheKb()) {
         override fun sizeOf(key: Int, value: Bitmap): Int = value.byteCount / 1024
     }
 
-    fun cached(index: Int, screenW: Int): Bitmap? =
-        if (cacheWidth == screenW) cache.get(index) else null
+    /** Any already-rendered version of this page (may be lower resolution). */
+    fun cached(index: Int): Bitmap? = cache.get(index)
 
-    suspend fun page(index: Int, screenW: Int): Bitmap? {
+    /**
+     * Page image, [targetW] px wide after trimming margins. A cached copy is
+     * reused unless the caller now needs noticeably more resolution (zoom).
+     */
+    suspend fun page(index: Int, targetW: Int): Bitmap? {
         if (closed || index < 0 || index >= pageCount) return null
-        cached(index, screenW)?.let { return it }
+        cache.get(index)?.let { if (it.width >= targetW * 0.9f) return it }
         return withContext(Dispatchers.IO) {
             mutex.withLock {
                 if (closed) return@withLock null
-                if (cacheWidth != screenW) {
-                    cache.evictAll()
-                    cacheWidth = screenW
-                }
-                cache.get(index) ?: try {
-                    renderCropped(index, screenW)?.also { cache.put(index, it) }
+                val have = cache.get(index)
+                if (have != null && have.width >= targetW * 0.9f) return@withLock have
+                try {
+                    renderCropped(index, targetW)?.also { cache.put(index, it) }
                 } catch (e: Exception) {
-                    null
+                    have
                 } catch (e: OutOfMemoryError) {
                     cache.evictAll()
                     null
@@ -87,10 +88,9 @@ class PdfEngine private constructor(
         }
     }
 
-    private fun renderCropped(index: Int, screenW: Int): Bitmap? {
+    private fun renderCropped(index: Int, targetW: Int): Bitmap? {
         val keep = 1f - 2f * margin
-        // Render ~25% wider than the screen so text stays sharp after cropping.
-        val fullW = (screenW * 1.25f / keep).toInt().coerceIn(200, 2200)
+        val fullW = (targetW / keep).toInt().coerceIn(200, 3400)
         val full = renderRaw(index, fullW) ?: return null
         val x = (full.width * margin).toInt()
         if (x <= 0) return full
@@ -112,35 +112,44 @@ class PdfEngine private constructor(
         }
     }
 
-    /** Looks at one early page to find how much white margin can be trimmed. */
+    /** Side margin (fraction of width) of one page, or -1 if the page is blank. */
+    private fun pageMargin(index: Int): Float {
+        val bmp = renderRaw(index, 360) ?: return -1f
+        val w = bmp.width
+        val h = bmp.height
+        val row = IntArray(w)
+        var minX = w
+        var maxX = -1
+        var y = 0
+        while (y < h) {
+            bmp.getPixels(row, 0, w, 0, y, w, 1)
+            var x = 0
+            while (x < w) {
+                val p = row[x]
+                if (Color.red(p) < 225 || Color.green(p) < 225 || Color.blue(p) < 225) {
+                    if (x < minX) minX = x
+                    if (x > maxX) maxX = x
+                }
+                x += 2
+            }
+            y += 2
+        }
+        bmp.recycle()
+        if (maxX <= minX) return -1f
+        return minOf(minX.toFloat() / w, (w - 1 - maxX).toFloat() / w)
+    }
+
+    /** Samples a few pages across the book and trims the typical white margin. */
     private fun detectMargin() {
         try {
-            if (pageCount == 0) return
-            val bmp = renderRaw(minOf(2, pageCount - 1), 480) ?: return
-            val w = bmp.width
-            val h = bmp.height
-            val row = IntArray(w)
-            var minX = w
-            var maxX = -1
-            var y = 0
-            while (y < h) {
-                bmp.getPixels(row, 0, w, 0, y, w, 1)
-                var x = 0
-                while (x < w) {
-                    val p = row[x]
-                    if (Color.red(p) < 225 || Color.green(p) < 225 || Color.blue(p) < 225) {
-                        if (x < minX) minX = x
-                        if (x > maxX) maxX = x
-                    }
-                    x += 2
-                }
-                y += 2
-            }
-            bmp.recycle()
-            if (maxX > minX) {
-                val left = minX.toFloat() / w
-                val right = (w - 1 - maxX).toFloat() / w
-                margin = (minOf(left, right) - 0.02f).coerceIn(0f, 0.12f)
+            val n = pageCount
+            if (n == 0) return
+            val picks = listOf(minOf(2, n - 1), minOf(6, n - 1), n / 4, n / 2, (3 * n) / 4)
+                .filter { it in 0 until n }.distinct()
+            val found = picks.map { pageMargin(it) }.filter { it >= 0f }.sorted()
+            if (found.isNotEmpty()) {
+                val median = found[found.size / 2]
+                margin = (median - 0.015f).coerceIn(0f, 0.2f)
             }
         } catch (e: Exception) {
         }

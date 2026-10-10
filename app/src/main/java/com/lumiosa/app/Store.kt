@@ -35,6 +35,12 @@ class HistoryStore(ctx: Context) {
         prefs.edit().putString("items", arr.toString()).apply()
     }
 
+    fun zoom(): Float = prefs.getFloat("zoom2", 2f)
+
+    fun setZoom(z: Float) {
+        prefs.edit().putFloat("zoom2", z).apply()
+    }
+
     fun touch(item: HistItem): List<HistItem> {
         val list = (listOf(item) + load().filter { it.uri != item.uri }).take(12)
         save(list)

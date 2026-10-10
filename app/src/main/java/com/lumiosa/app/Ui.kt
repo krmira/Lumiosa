@@ -30,7 +30,6 @@ object Pal {
     val Leaf = Color(0xFF5A944E)   // accent
     val Ink = Color(0xFFCADBC2)    // soft text, easy on the eyes
     val Dim = Color(0xFF8FA88A)
-    val Tile = Color(0xFFF4F8F1)   // light tile behind the logo
 }
 
 private const val DEEP_HEX = 0x1E211D
@@ -56,12 +55,12 @@ val NightFilter: ColorFilter = run {
 
 @Composable
 fun LogoTile(onClick: (() -> Unit)?) {
-    val base = Modifier.size(40.dp).clip(RoundedCornerShape(10.dp)).background(Pal.Tile)
+    val base = Modifier.size(48.dp)
     Image(
         painter = painterResource(R.drawable.logo),
         contentDescription = "Lumiosa",
         contentScale = ContentScale.Fit,
-        modifier = (if (onClick != null) base.clickable(onClick = onClick) else base).padding(2.dp)
+        modifier = if (onClick != null) base.clickable(onClick = onClick) else base
     )
 }
 
