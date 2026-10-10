@@ -10,4 +10,4 @@ Android's built-in renderer, so files open instantly and keep their real layout.
 - History of recent PDFs with thumbnails, and it remembers your page
 
 # Download 
-https://github.com/krmira/Lumiosa/actions/runs/38041698268/artifacts/11666117058https://github.com/krmira/Lumiosa/actions/runs/38041698268/artifacts/11666117058
+https://github.com/krmira/Lumiosa/actions/runs/38044143750/artifacts/11665819598
