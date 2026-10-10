@@ -9,4 +9,5 @@ Android's built-in renderer, so files open instantly and keep their real layout.
 - Side margins are trimmed automatically so text is larger on small screens
 - History of recent PDFs with thumbnails, and it remembers your page
 
-Build: push to GitHub, run the "Build Lumiosa APK" action, download the `Lumiosa-apk` artifact.
+# Download 
+https://github.com/krmira/Lumiosa/actions/runs/38041698268/artifacts/11666117058https://github.com/krmira/Lumiosa/actions/runs/38041698268/artifacts/11666117058
