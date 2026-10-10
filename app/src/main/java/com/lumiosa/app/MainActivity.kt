@@ -100,6 +100,7 @@ fun App(initialUri: Uri?) {
     var doc by remember { mutableStateOf<HistItem?>(null) }
     var night by remember { mutableStateOf(true) }
     var zoom by remember { mutableStateOf(store.zoom()) }
+    var rzoom by remember { mutableStateOf(store.rzoom()) }
     var reflow by remember { mutableStateOf(store.reflow()) }
     var message by remember { mutableStateOf("") }
 
@@ -139,6 +140,10 @@ fun App(initialUri: Uri?) {
         delay(500)
         store.setZoom(zoom)
     }
+    LaunchedEffect(rzoom) {
+        delay(500)
+        store.setRzoom(rzoom)
+    }
 
     BackHandler(enabled = doc != null) {
         engine?.close()
@@ -153,8 +158,8 @@ fun App(initialUri: Uri?) {
             engine = eng,
             startPage = cur.page,
             night = night,
-            zoom = zoom,
-            onZoom = { zoom = it.coerceIn(1f, 5f) },
+            zoom = if (reflow) rzoom else zoom,
+            onZoom = { if (reflow) rzoom = it.coerceIn(1f, 5f) else zoom = it.coerceIn(1f, 5f) },
             onNight = { night = !night },
             reflow = reflow,
             onReflow = {
@@ -360,7 +365,7 @@ private fun ReaderScreen(
                         PageView(
                             engine, i, wPx, zoom, night,
                             onDoubleTap = {
-                                val next = listOf(2.8f, 3.6f, 4.5f).firstOrNull { it > zoom + 0.05f } ?: 2f
+                                val next = listOf(1.8f, 2.6f, 3.6f).firstOrNull { it > zoom + 0.05f } ?: 1f
                                 onZoom(next)
                             }
                         )
@@ -413,7 +418,10 @@ private fun PageView(
     }
 }
 
-/** Reflowed text of one page: wraps to the screen width at any zoom. */
+/**
+ * Reflowed text of one page. Body text is [zoom]x the size it has in fit-to-width page view
+ * (so 2x = double); titles keep the size they have in page view, whatever the zoom.
+ */
 @Composable
 private fun ReflowView(rf: ReflowEngine, index: Int, zoom: Float, night: Boolean) {
     var paras by remember(rf, index) { mutableStateOf(rf.cached(index)) }
@@ -422,7 +430,11 @@ private fun ReflowView(rf: ReflowEngine, index: Int, zoom: Float, night: Boolean
         rf.prefetch(index)
     }
     val ink = if (night) Pal.Ink else Color(0xFF1E211D)
-    val size = (9f * zoom).sp
+    // dp on screen per point of the PDF page, as in fit-to-width page view
+    val screenDp = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp
+    val unit = (screenDp - 32f) / rf.pageWidthPt
+    val bodyPt = if (rf.bodyPt > 0f) rf.bodyPt else 11f
+    val bodySp = (bodyPt * unit * zoom).coerceAtLeast(14f)
     val p = paras
     Column(
         Modifier.fillMaxSize()
@@ -436,13 +448,19 @@ private fun ReflowView(rf: ReflowEngine, index: Int, zoom: Float, night: Boolean
                 style = TextStyle(color = Pal.Dim, fontSize = 16.sp, lineHeight = 22.sp)
             )
             else -> p.forEach { para ->
+                val title = para.heading > 0f
+                val sp = if (title) (para.heading * bodyPt * unit).coerceAtLeast(16f) else bodySp
                 BasicText(
-                    para,
-                    modifier = Modifier.fillMaxWidth().padding(bottom = (size.value * 0.6f).dp),
+                    para.text,
+                    modifier = Modifier.fillMaxWidth().padding(
+                        top = if (title) (sp * 0.5f).dp else 0.dp,
+                        bottom = (sp * 0.6f).dp
+                    ),
                     style = TextStyle(
                         color = ink,
-                        fontSize = size,
-                        lineHeight = size * 1.45f,
+                        fontSize = sp.sp,
+                        lineHeight = (sp * 1.4f).sp,
+                        fontWeight = if (title) androidx.compose.ui.text.font.FontWeight.Bold else null,
                         fontFamily = FontFamily.Serif
                     )
                 )

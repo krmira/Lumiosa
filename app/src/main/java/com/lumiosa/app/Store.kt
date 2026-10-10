@@ -35,16 +35,24 @@ class HistoryStore(ctx: Context) {
         prefs.edit().putString("items", arr.toString()).apply()
     }
 
-    fun zoom(): Float = prefs.getFloat("zoom2", 2f)
+    // Page view: 1x = whole page width fits the screen (no sideways scrolling).
+    fun zoom(): Float = prefs.getFloat("pzoom", 1f)
 
     fun setZoom(z: Float) {
-        prefs.edit().putFloat("zoom2", z).apply()
+        prefs.edit().putFloat("pzoom", z).apply()
     }
 
-    fun reflow(): Boolean = prefs.getBoolean("reflow", false)
+    // Reflow text size multiplier: 2x = 18sp body text.
+    fun rzoom(): Float = prefs.getFloat("rzoom", 2f)
+
+    fun setRzoom(z: Float) {
+        prefs.edit().putFloat("rzoom", z).apply()
+    }
+
+    fun reflow(): Boolean = prefs.getBoolean("reflow2", true)
 
     fun setReflow(on: Boolean) {
-        prefs.edit().putBoolean("reflow", on).apply()
+        prefs.edit().putBoolean("reflow2", on).apply()
     }
 
     fun touch(item: HistItem): List<HistItem> {
