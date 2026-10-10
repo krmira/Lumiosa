@@ -1,0 +1,36 @@
+name: Build Lumiosa APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build release APK (small, shrunk)
+        run: gradle --no-daemon assembleRelease
+
+      - name: Name APK
+        run: cp app/build/outputs/apk/release/app-release.apk Lumiosa.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Lumiosa-apk
+          path: Lumiosa.apk
+          if-no-files-found: error
